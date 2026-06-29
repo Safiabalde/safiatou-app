@@ -1,30 +1,83 @@
 'use client';
 import { NOTIFICATIONS_SCHEDULE } from './data';
 
-const VAPID_PUBLIC = process.env.NEXT_PUBLIC_VAPID_KEY!;
+const VAPID_PUBLIC = process.env.NEXT_PUBLIC_VAPID_KEY || '';
 
 export async function registerSW(): Promise<ServiceWorkerRegistration | null> {
   if (!('serviceWorker' in navigator)) return null;
-  const reg = await navigator.serviceWorker.register('/sw.js');
-  return reg;
+  try {
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    return reg;
+  } catch (e) {
+    console.error('SW registration failed', e);
+    return null;
+  }
 }
 
-export async function requestAndSubscribe(): Promise<boolean> {
+export interface SubscribeResult {
+  ok: boolean;
+  step: string;
+  detail?: string;
+}
+
+export async function requestAndSubscribe(): Promise<SubscribeResult> {
+  if (!('Notification' in window)) {
+    return { ok: false, step: 'unsupported', detail: 'Notification API absente sur ce navigateur.' };
+  }
+  if (!('serviceWorker' in navigator)) {
+    return { ok: false, step: 'unsupported', detail: 'Service Worker non supporté.' };
+  }
+
+  let perm: NotificationPermission;
   try {
-    const perm = await Notification.requestPermission();
-    if (perm !== 'granted') return false;
-    const reg = await registerSW();
-    if (!reg) return false;
-    // Subscribe to push
-    const sub = await reg.pushManager.subscribe({
+    perm = await Notification.requestPermission();
+  } catch (e) {
+    return { ok: false, step: 'permission', detail: String(e) };
+  }
+  if (perm !== 'granted') {
+    return { ok: false, step: 'permission-denied', detail: `Permission: ${perm}` };
+  }
+
+  const reg = await registerSW();
+  if (!reg) {
+    return { ok: false, step: 'sw-register', detail: 'Le service worker n\'a pas pu s\'enregistrer.' };
+  }
+
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches
+    || (window.navigator as unknown as { standalone?: boolean }).standalone === true;
+
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+
+  if (isIOS && !isStandalone) {
+    return { ok: false, step: 'ios-not-installed', detail: 'Sur iPhone, ouvre l\'app depuis l\'icône installée (pas Safari) pour activer les rappels.' };
+  }
+
+  if (!('pushManager' in reg)) {
+    scheduleLocalNotifs(reg);
+    return { ok: true, step: 'local-only', detail: 'Rappels programmés pour cette session (push serveur non supporté).' };
+  }
+
+  if (!VAPID_PUBLIC) {
+    scheduleLocalNotifs(reg);
+    return { ok: true, step: 'local-only-no-vapid', detail: 'Rappels programmés localement (clé VAPID absente).' };
+  }
+
+  try {
+    const existing = await reg.pushManager.getSubscription();
+    if (existing) await existing.unsubscribe();
+
+    await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC) as unknown as ArrayBuffer,
     });
-    await fetch('/api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub) });
-    // Schedule local notifications via alarms (using setTimeout for current session)
+  } catch (e) {
     scheduleLocalNotifs(reg);
-    return true;
-  } catch (e) { console.error(e); return false; }
+    return { ok: true, step: 'local-fallback', detail: `Push serveur indisponible (${String(e)}), rappels locaux activés.` };
+  }
+
+  scheduleLocalNotifs(reg);
+  return { ok: true, step: 'full' };
 }
 
 export function scheduleLocalNotifs(reg: ServiceWorkerRegistration) {
@@ -41,7 +94,6 @@ export function scheduleLocalNotifs(reg: ServiceWorkerRegistration) {
           body: n.body,
           icon: '/icon-192.png',
           badge: '/icon-192.png',
-          // vibrate: [300, 100, 300],
           tag: n.id,
         });
       }, diff);

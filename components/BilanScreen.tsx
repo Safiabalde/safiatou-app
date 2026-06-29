@@ -36,12 +36,12 @@ export default function BilanScreen({ state, setState }: Props) {
   const msg = msgs[Math.min(4, Math.floor(score / 20))];
 
   async function enableNotifs() {
-    const ok = await requestAndSubscribe();
-    if (ok) {
+    const result = await requestAndSubscribe();
+    if (result.ok) {
       setState({ ...state, notifEnabled: true });
-      showToast('🔔 Rappels activés ! Tu recevras tes alertes 🎉');
+      showToast('🔔 Rappels activés ! ' + (result.detail || ''));
     } else {
-      showToast('⚠️ Autorise les notifications dans ton navigateur');
+      showToast('⚠️ ' + (result.detail || 'Erreur inconnue'));
     }
   }
 
